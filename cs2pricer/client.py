@@ -26,19 +26,45 @@ class CSFloatError(RuntimeError):
 
 class CSFloatClient:
     def __init__(self, *, max_retries: int = 5, base_backoff: float = 2.0,
-                 min_interval: float = 1.0):
+                 min_interval: float = 1.0, max_wait: float = 1900.0):
         # Auth is the raw API key in the Authorization header (no "Bearer").
         self._session = requests.Session()
         self._session.headers.update({"Authorization": api_key()})
         self._max_retries = max_retries
         self._base_backoff = base_backoff
         self._min_interval = min_interval  # polite floor between calls (seconds)
+        self._max_wait = max_wait          # cap on any single rate-limit sleep
         self._last_call = 0.0
+        # Updated from x-ratelimit-* headers so we can wait *before* hitting 429.
+        self._rl_remaining: int | None = None
+        self._rl_reset: float = 0.0
+
+    def _reset_in(self) -> float:
+        return max(0.0, min(self._rl_reset - time.time(), self._max_wait))
 
     def _throttle(self) -> None:
+        # Proactive: if the last response said the window is empty, wait for reset.
+        if self._rl_remaining is not None and self._rl_remaining <= 0:
+            wait = self._reset_in()
+            if wait > 0:
+                time.sleep(wait + 1)
         elapsed = time.monotonic() - self._last_call
         if elapsed < self._min_interval:
             time.sleep(self._min_interval - elapsed)
+
+    def _note_headers(self, resp: requests.Response) -> None:
+        rem = resp.headers.get("x-ratelimit-remaining")
+        rst = resp.headers.get("x-ratelimit-reset")
+        if rem is not None:
+            try:
+                self._rl_remaining = int(rem)
+            except ValueError:
+                pass
+        if rst is not None:
+            try:
+                self._rl_reset = float(rst)
+            except ValueError:
+                pass
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{BASE_URL}{path}"
@@ -46,14 +72,18 @@ class CSFloatClient:
             self._throttle()
             resp = self._session.get(url, params=params, timeout=30)
             self._last_call = time.monotonic()
+            self._note_headers(resp)
 
-            if resp.status_code == 429 or resp.status_code >= 500:
-                # Back off and retry. Honor Retry-After if present.
+            if resp.status_code == 429:
+                # Honor the reset header (Retry-After as fallback), then retry.
                 retry_after = resp.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else self._base_backoff * (2 ** attempt)
-                time.sleep(wait)
+                wait = (float(retry_after) if retry_after else self._reset_in()
+                        or self._base_backoff * (2 ** attempt))
+                time.sleep(min(wait, self._max_wait) + 1)
                 continue
-
+            if resp.status_code >= 500:
+                time.sleep(self._base_backoff * (2 ** attempt))
+                continue
             if not resp.ok:
                 raise CSFloatError(f"{resp.status_code} {resp.reason} for {url}: {resp.text[:300]}")
 
