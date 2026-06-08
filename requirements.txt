@@ -2,3 +2,8 @@ requests
 python-dotenv
 pandas
 pyarrow
+lightgbm
+scikit-learn
+fastapi
+uvicorn[standard]
+streamlit
