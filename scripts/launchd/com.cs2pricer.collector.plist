@@ -21,17 +21,17 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/dna/Desktop/coding-projects/cs2-skin-pricer/.venv/bin/python</string>
-        <string>/Users/dna/Desktop/coding-projects/cs2-skin-pricer/scripts/collect.py</string>
+        <string>/Users/dna/coding-projects/cs2-skin-pricer/.venv/bin/python</string>
+        <string>/Users/dna/coding-projects/cs2-skin-pricer/scripts/collect.py</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/dna/Desktop/coding-projects/cs2-skin-pricer</string>
+    <string>/Users/dna/coding-projects/cs2-skin-pricer</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONPATH</key>
-        <string>/Users/dna/Desktop/coding-projects/cs2-skin-pricer</string>
+        <string>/Users/dna/coding-projects/cs2-skin-pricer</string>
     </dict>
 
     <!-- Every 12 hours. Each run is a ~100-request burst, well under the 200/window cap. -->
@@ -42,8 +42,8 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/dna/Desktop/coding-projects/cs2-skin-pricer/data/collector/collect.log</string>
+    <string>/Users/dna/coding-projects/cs2-skin-pricer/data/collector/collect.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/dna/Desktop/coding-projects/cs2-skin-pricer/data/collector/collect.log</string>
+    <string>/Users/dna/coding-projects/cs2-skin-pricer/data/collector/collect.log</string>
 </dict>
 </plist>

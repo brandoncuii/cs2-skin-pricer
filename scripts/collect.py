@@ -19,7 +19,8 @@ def main() -> int:
     con = connect()
     summary = collect_once(con, CSFloatClient())
     con.close()
-    print(f"[{summary['observed_at']}] done: "
+    end = datetime.now(timezone.utc).isoformat()
+    print(f"[{end}] done (snapshot {summary['observed_at']}): "
           f"listed_seen={summary['listed_seen']} disappeared={summary['disappeared']}",
           flush=True)
     return 0
