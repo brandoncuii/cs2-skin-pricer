@@ -25,6 +25,7 @@ from .features import CATEGORICAL_COLS, FEATURE_COLS, TARGET_COL
 
 QUANTILES = (0.10, 0.50, 0.90)
 MODEL_DIR = Path("data/model")
+MODEL_V15_DIR = Path("data/model_v15")
 
 # LightGBM parameters shared across quantile models.
 _BASE_PARAMS: dict[str, Any] = {
@@ -144,6 +145,24 @@ def load_models(model_dir: Path = MODEL_DIR) -> dict[float, lgb.Booster]:
         path = model_dir / f"lgb_q{int(q*100)}.txt"
         models[q] = lgb.Booster(model_file=str(path))
     return models
+
+
+def load_models_v15() -> dict[float, lgb.Booster] | None:
+    """Load v1.5 models if they exist, else return None."""
+    if not MODEL_V15_DIR.exists():
+        return None
+    try:
+        return load_models(MODEL_V15_DIR)
+    except Exception:
+        return None
+
+
+def v15_available() -> bool:
+    """Check whether v1.5 model artifacts exist on disk."""
+    return all(
+        (MODEL_V15_DIR / f"lgb_q{int(q*100)}.txt").exists()
+        for q in QUANTILES
+    )
 
 
 def save_metadata(result: dict[str, Any], df: pd.DataFrame,

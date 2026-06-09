@@ -26,7 +26,8 @@ from .client import CSFloatClient
 from .clean import flatten_listing
 from .features import (CATEGORICAL_COLS, DOPPLER_PHASE, FEATURE_COLS,
                        FLOAT_BOUNDARIES, KARAMBIT_CH_GEM_TIER, add_features)
-from .model import MODEL_DIR, QUANTILES, load_models, predict
+from .model import (MODEL_DIR, MODEL_V15_DIR, QUANTILES, load_models,
+                    load_models_v15, predict, v15_available)
 from .skins import SKINS, market_hash_names
 
 app = FastAPI(
@@ -47,19 +48,39 @@ app.add_middleware(
 )
 
 # --- Load models at startup ---
-_models: dict[float, Any] | None = None
+_models_v1: dict[float, Any] | None = None
+_models_v15: dict[float, Any] | None = None
 
 
-def _get_models():
-    global _models
-    if _models is None:
+def _get_models(version: str = "v1") -> dict[float, Any]:
+    global _models_v1, _models_v15
+    if version == "v1.5" and v15_available():
+        if _models_v15 is None:
+            _models_v15 = load_models_v15()
+        if _models_v15 is not None:
+            return _models_v15
+    # Fall back to v1.
+    if _models_v1 is None:
         if not MODEL_DIR.exists():
             raise HTTPException(
                 status_code=503,
                 detail="Model not trained yet. Run: PYTHONPATH=. .venv/bin/python scripts/train_model.py",
             )
-        _models = load_models()
-    return _models
+        _models_v1 = load_models()
+    return _models_v1
+
+
+def _basis_text(version: str) -> str:
+    if version == "v1.5" and v15_available():
+        return "v1.5: trained on inferred sold prices (collector disappearance data)"
+    return "v1: trained on asking prices (not sold prices)"
+
+
+def _resolve_version(version: str | None) -> str:
+    """Resolve requested version, falling back to v1 if v1.5 unavailable."""
+    if version == "v1.5" and v15_available():
+        return "v1.5"
+    return "v1"
 
 
 # --- Request/Response schemas ---
@@ -151,9 +172,9 @@ def _build_row(inp: ListingInput) -> pd.DataFrame:
     return df
 
 
-def _score_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _score_dataframe(df: pd.DataFrame, version: str = "v1") -> pd.DataFrame:
     """Score a full DataFrame and add prediction columns."""
-    models = _get_models()
+    models = _get_models(version)
     preds = predict(models, df)
     return df.assign(**preds)
 
@@ -163,14 +184,23 @@ def _score_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": _models is not None}
+    return {
+        "status": "ok",
+        "v1_loaded": _models_v1 is not None,
+        "v15_available": v15_available(),
+        "v15_loaded": _models_v15 is not None,
+    }
 
 
 @app.post("/score", response_model=ScoreResponse)
-def score_listing(inp: ListingInput):
-    """Score a single listing: returns {low, mid, high} USD fair-value range."""
+def score_listing(inp: ListingInput, version: str | None = None):
+    """Score a single listing: returns {low, mid, high} USD fair-value range.
+
+    Query param `version`: 'v1' (default) or 'v1.5' (if available).
+    """
+    ver = _resolve_version(version)
     df = _build_row(inp)
-    scored = _score_dataframe(df)
+    scored = _score_dataframe(df, ver)
     row = scored.iloc[0]
 
     is_deal = row["price_usd"] < row["low_usd"]
@@ -184,11 +214,12 @@ def score_listing(inp: ListingInput):
         high_usd=round(row["high_usd"], 2),
         is_deal=bool(is_deal),
         discount_pct=discount,
+        basis=_basis_text(ver),
     )
 
 
 @app.get("/deals", response_model=DealsResponse)
-def find_deals(max_pages: int = 3):
+def find_deals(max_pages: int = 3, version: str | None = None):
     """Pull live listings for locked skins and return those priced below model's low estimate.
 
     This hits the CSFloat API in real-time (rate-limited), so response time depends
@@ -215,7 +246,8 @@ def find_deals(max_pages: int = 3):
     df = df[df["price_usd"].gt(0) & df["float_value"].notna() & df["paint_seed"].notna()].copy()
     df = add_features(df)
 
-    scored = _score_dataframe(df)
+    ver = _resolve_version(version)
+    scored = _score_dataframe(df, ver)
     scored["is_deal"] = scored["price_usd"] < scored["low_usd"]
     scored["discount_pct"] = np.where(
         scored["is_deal"],
@@ -243,7 +275,8 @@ def find_deals(max_pages: int = 3):
             exterior=r.get("exterior"),
         ))
 
-    return DealsResponse(total_scored=len(scored), deals=deal_list)
+    return DealsResponse(total_scored=len(scored), deals=deal_list,
+                         basis=_basis_text(ver))
 
 
 @app.get("/skins")
