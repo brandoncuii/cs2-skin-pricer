@@ -16,14 +16,31 @@ python3 -m venv .venv
 
 mkdir -p data/collector
 
-# Every 12h. Cron has no missed-run catch-up, but the Pi is always on so
-# that doesn't matter (it's why we're here instead of on the laptop).
-CRON_LINE="17 */12 * * * cd $REPO_DIR && PYTHONPATH=. .venv/bin/python scripts/collect.py >> data/collector/collect.log 2>&1"
-( crontab -l 2>/dev/null | grep -vF "scripts/collect.py" || true; echo "$CRON_LINE" ) | crontab -
+LOCK_FILE="/tmp/cs2-collector.lock"
 
-echo "Cron entry installed:"
+# Locked skins (fast) — every 3h. High-liquidity names benefit from tighter
+# polling: more disappearance observations = better v1.5 training data.
+CRON_LOCKED="17 */3 * * * flock --nonblock $LOCK_FILE bash -c 'cd $REPO_DIR && PYTHONPATH=. .venv/bin/python scripts/collect.py >> data/collector/collect_locked.log 2>&1'"
+
+# Full sweep (slow) — every 12h. ~2,920 names; offset to minute 47 to avoid
+# simultaneous start with the locked poll.
+CRON_FULL="47 */12 * * * flock --nonblock $LOCK_FILE bash -c 'cd $REPO_DIR && PYTHONPATH=. .venv/bin/python scripts/collect.py --full --min-qty 1 >> data/collector/collect_full.log 2>&1'"
+
+( crontab -l 2>/dev/null | grep -vF "scripts/collect.py" || true
+  echo "$CRON_LOCKED"
+  echo "$CRON_FULL"
+) | crontab -
+
+echo "Cron entries installed:"
 crontab -l | grep collect.py
 cat <<'EOF'
+
+Dual-schedule collector (flock prevents overlapping runs):
+  Locked skins : every 3h  (minute 17) — 4 names, 3 pages each
+  Full sweep   : every 12h (minute 47) — all knives, --min-qty 1 gated
+  Lock file    : /tmp/cs2-collector.lock (flock --nonblock; skip if held)
+  Logs         : data/collector/collect_locked.log
+                 data/collector/collect_full.log
 
 Manual steps to finish:
   1. API key:        echo 'CSFLOAT_API_KEY=<your key>' > .env
