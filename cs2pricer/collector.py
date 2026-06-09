@@ -48,14 +48,16 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 
 def collect_once(con: sqlite3.Connection, client: CSFloatClient,
-                 names: list[str] | None = None) -> dict:
+                 names: list[str] | None = None,
+                 max_pages: int | None = None) -> dict:
     if names is None:
         names = market_hash_names(stattrak=False) + market_hash_names(stattrak=True)
     now = datetime.now(timezone.utc).isoformat()
 
     seen: set[str] = set()
     for name in names:
-        for raw in client.iter_listings(market_hash_name=name, type="buy_now"):
+        for raw in client.iter_listings(market_hash_name=name, type="buy_now",
+                                        max_pages=max_pages):
             r = flatten_listing(raw)
             lid = r["id"]
             seen.add(lid)

@@ -1,4 +1,4 @@
-"""Phase 5 — Streamlit frontend for CS2 Knife Fair-Value (v1).
+"""Phase 5 — Streamlit frontend for CS2 Knife Fair-Value.
 
 Two views:
   1. **Find Deals** — pulls live CSFloat listings, scores them, shows those priced
@@ -6,9 +6,7 @@ Two views:
   2. **Score a Listing** — manually input a listing's attributes and get its
      fair-value range.
 
-Honestly labeled: this model is trained on asking prices. A "deal" means the
-listing is priced below what comparable items are currently listed for — NOT below
-true fair value (which requires sold-price data, coming in v1.5).
+Supports both v1 (asking-price) and v1.5 (sold-price) models when available.
 
 Run: PYTHONPATH=. .venv/bin/streamlit run app.py
 """
@@ -23,31 +21,66 @@ import streamlit as st
 from cs2pricer.clean import flatten_listing
 from cs2pricer.client import CSFloatClient
 from cs2pricer.features import DOPPLER_PHASE, add_features
-from cs2pricer.model import MODEL_DIR, load_models, predict
+from cs2pricer.model import (MODEL_DIR, MODEL_V15_DIR, load_models,
+                             load_models_v15, predict, v15_available)
 from cs2pricer.skins import EXTERIORS, SKINS, market_hash_names
 
-st.set_page_config(page_title="CS2 Knife Pricer (v1)", page_icon="🔪", layout="wide")
+st.set_page_config(page_title="CS2 Knife Pricer", page_icon="🔪", layout="wide")
 
 # --- Load models ---
 @st.cache_resource
-def get_models():
+def get_models_v1():
     if not MODEL_DIR.exists():
         return None
     return load_models()
 
 
-models = get_models()
-if models is None:
+@st.cache_resource
+def get_models_v15():
+    if not v15_available():
+        return None
+    return load_models_v15()
+
+
+models_v1 = get_models_v1()
+models_v15 = get_models_v15()
+
+if models_v1 is None:
     st.error("Model not trained yet. Run: `PYTHONPATH=. .venv/bin/python scripts/train_model.py`")
     st.stop()
 
 # --- Sidebar ---
 st.sidebar.title("🔪 CS2 Knife Pricer")
-st.sidebar.caption(
-    "**v1 — trained on asking prices.**\n\n"
-    "A 'deal' means priced below what comparable items are currently listed for. "
-    "This is NOT true fair value (requires sold-price data → v1.5)."
-)
+
+# Model version selector.
+version_options = ["v1 (asking prices)"]
+if models_v15 is not None:
+    version_options.append("v1.5 (sold prices)")
+
+selected_version_label = st.sidebar.radio("Model Version", version_options)
+use_v15 = "v1.5" in selected_version_label and models_v15 is not None
+active_models = models_v15 if use_v15 else models_v1
+version_tag = "v1.5" if use_v15 else "v1"
+
+if use_v15:
+    st.sidebar.caption(
+        "**v1.5 — trained on inferred sold prices.**\n\n"
+        "Uses collector disappearance data to estimate actual transaction prices. "
+        "More accurate than v1's asking-price basis."
+    )
+else:
+    st.sidebar.caption(
+        "**v1 — trained on asking prices.**\n\n"
+        "A 'deal' means priced below what comparable items are currently listed for. "
+        "This is NOT true fair value (requires sold-price data → v1.5)."
+    )
+
+if models_v15 is None:
+    st.sidebar.info(
+        "v1.5 not available yet. Train it with:\n"
+        "`PYTHONPATH=. .venv/bin/python scripts/train_model_v15.py`"
+    )
+
 page = st.sidebar.radio("View", ["Find Deals", "Score a Listing"])
 
 # --- Helpers ---
@@ -66,12 +99,10 @@ def get_reference_prices() -> dict[str, float]:
 def score_df(df: pd.DataFrame, refs: dict[str, float]) -> pd.DataFrame:
     """Add features and score a DataFrame."""
     df = add_features(df)
-    # Override reference with dataset medians for consistency.
     df["reference_usd"] = df["skin_base"].map(refs)
-    # Fallback: if a skin isn't in refs, use its own price.
     df["reference_usd"] = df["reference_usd"].fillna(df["price_usd"])
     df["log_premium"] = np.log(df["price_usd"]) - np.log(df["reference_usd"])
-    preds = predict(models, df)
+    preds = predict(active_models, df)
     return df.assign(**preds)
 
 
@@ -79,7 +110,7 @@ def score_df(df: pd.DataFrame, refs: dict[str, float]) -> pd.DataFrame:
 if page == "Find Deals":
     st.title("Live Deals — Cheaper Than Comparable Asks")
     st.caption(
-        "Pulls current CSFloat buy_now listings, scores them with the model, "
+        f"Model: **{version_tag}** — Pulls current CSFloat buy_now listings, scores them, "
         "and shows those priced below the model's 10th-percentile estimate."
     )
 
@@ -97,7 +128,6 @@ if page == "Find Deals":
         refs = get_reference_prices()
         client = CSFloatClient()
 
-        # Build names for selected skins.
         names = []
         for skin in SKINS:
             if skin["base"] in selected_skins:
@@ -120,7 +150,6 @@ if page == "Find Deals":
             st.warning("No listings found.")
             st.stop()
 
-        # Flatten and score.
         flat = [flatten_listing(r) for r in raw_listings]
         df = pd.DataFrame(flat)
         df = df[df["price_usd"].gt(0) & df["float_value"].notna() & df["paint_seed"].notna()].copy()
@@ -165,7 +194,10 @@ if page == "Find Deals":
 # === PAGE: Score a Listing ===
 elif page == "Score a Listing":
     st.title("Score a Single Listing")
-    st.caption("Enter a listing's attributes to get its estimated fair-value range.")
+    st.caption(
+        f"Model: **{version_tag}** — Enter a listing's attributes to get its "
+        "estimated fair-value range."
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -181,7 +213,6 @@ elif page == "Score a Listing":
         paint_index = st.number_input("Paint Index", min_value=0, max_value=1000, value=418)
         def_index = st.number_input("Def Index", min_value=0, value=507)
 
-    # Build market_hash_name.
     prefix = "★ StatTrak™ " if is_stattrak else "★ "
     weapon_finish = skin_base.replace("★ ", "")
     market_hash_name = f"{prefix}{weapon_finish} ({exterior})"
@@ -213,7 +244,6 @@ elif page == "Score a Listing":
 
         is_deal = row["price_usd"] < row["low_usd"]
 
-        # Display result.
         st.divider()
         col_r1, col_r2, col_r3 = st.columns(3)
         col_r1.metric("Low (10th pctile)", f"${row['low_usd']:.2f}")
@@ -233,12 +263,17 @@ elif page == "Score a Listing":
                 f"estimated range for comparable asks."
             )
 
-        # Show Doppler phase if applicable.
         phase = row.get("doppler_phase")
         if phase and phase != "n/a":
             st.caption(f"Doppler Phase: **{phase}** (from paint_index {paint_index})")
 
-        st.caption(
-            "⚠️ v1 basis: trained on asking prices. 'Deal' = cheaper than comparable "
-            "current asks, not below true fair value."
-        )
+        if use_v15:
+            st.caption(
+                "v1.5 basis: trained on inferred sold prices (collector disappearance data). "
+                "More accurate than asking-price estimates."
+            )
+        else:
+            st.caption(
+                "⚠️ v1 basis: trained on asking prices. 'Deal' = cheaper than comparable "
+                "current asks, not below true fair value."
+            )

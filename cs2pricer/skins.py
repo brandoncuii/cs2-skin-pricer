@@ -1,18 +1,13 @@
-"""The locked v1 knife set (Phase 0 deliverable).
+"""Knife skin definitions for CS2 Knife Pricer.
 
-Chosen on liquidity + feature coverage (see PLAN.md Phase 0):
-  - Two Dopplers (Karambit, M9) share one phase mapping and let the
-    premium-vs-reference framing generalize the phase effect across def_index.
-  - Case Hardened carries the paint_seed blue-gem regime AND the only real
-    float/exterior spread in the set (Dopplers/Fades are ~all Factory New).
-  - Fade exercises the fade-% feature.
+SKINS — the locked v1 set (4 skins, Phase 0 deliverable).
+ALL_KNIFE_SKINS — every CS2 knife type × finish for the expanded collector.
 
-`pattern` names the Phase-2 lookup each skin needs. Knife names carry the ★ prefix;
-phase/seed regimes are NOT in market_hash_name and get derived in Phase 2.
+The locked set is unchanged and used by the v1 model / scoring pipeline.
+The full set is used by the collector (--full flag) to accumulate sold-price
+data across the entire knife market for v1.5.
 """
 
-# All five so the pipeline can iterate; impossible skin x exterior combos simply
-# return no listings and get dropped in Phase 1.
 EXTERIORS = [
     "Factory New",
     "Minimal Wear",
@@ -20,6 +15,8 @@ EXTERIORS = [
     "Well-Worn",
     "Battle-Scarred",
 ]
+
+# ---------- Locked v1 set (DO NOT MODIFY) ----------
 
 SKINS = [
     {"base": "★ Karambit | Doppler", "pattern": "doppler_phase"},
@@ -30,16 +27,140 @@ SKINS = [
 
 
 def market_hash_names(stattrak: bool = False) -> list[str]:
-    """Every (skin x exterior) market_hash_name in the locked set.
-
-    StatTrak knives are a separate name ('★ StatTrak™ ...'); whether to pull them
-    is a Phase 1 scope decision (see PLAN.md §7 — is_stattrak is only a live feature
-    if ST rows are pulled).
-    """
+    """Every (skin x exterior) market_hash_name in the locked set."""
     prefix = "★ StatTrak™ " if stattrak else ""
     names = []
     for skin in SKINS:
         base = skin["base"].replace("★ ", prefix, 1) if stattrak else skin["base"]
         for ext in EXTERIORS:
             names.append(f"{base} ({ext})")
+    return names
+
+
+# ---------- All CS2 knife types ----------
+
+KNIFE_TYPES = [
+    "Bayonet",
+    "Bowie Knife",
+    "Butterfly Knife",
+    "Classic Knife",
+    "Falchion Knife",
+    "Flip Knife",
+    "Gut Knife",
+    "Huntsman Knife",
+    "Karambit",
+    "Kukri Knife",
+    "M9 Bayonet",
+    "Navaja Knife",
+    "Nomad Knife",
+    "Paracord Knife",
+    "Shadow Daggers",
+    "Skeleton Knife",
+    "Stiletto Knife",
+    "Survival Knife",
+    "Talon Knife",
+    "Ursus Knife",
+]
+
+# Finishes grouped by availability tier.
+# Tier 1: available on all 20 knife types (covert+ finishes).
+TIER1_FINISHES = [
+    "Doppler",
+    "Marble Fade",
+    "Tiger Tooth",
+    "Fade",
+    "Gamma Doppler",
+    "Autotronic",
+    "Bright Water",
+    "Freehand",
+    "Lore",
+    "Black Laminate",
+    "Case Hardened",
+    "Crimson Web",
+    "Slaughter",
+    "Blue Steel",
+    "Stained",
+    "Vanilla",
+    "Ultraviolet",
+    "Night Stripe",
+    "Urban Masked",
+    "Boreal Forest",
+    "Forest DDPAT",
+    "Safari Mesh",
+    "Scorched",
+    "Rust Coat",
+]
+
+# Tier 2: newer finishes on most knives.
+TIER2_FINISHES = [
+    "Damascus Steel",
+    "Night",
+    "Cobalt Skulls",
+    "Cosmic Industrial",
+    "Galactic Imperial",
+    "Spectral Tundra",
+]
+
+# Vanilla has no finish name in market_hash_name — it's just "★ Karambit".
+# We handle it specially below.
+
+# Build the full list. Each entry has "base" (market_hash_name stem) and "pattern".
+_DOPPLER_FINISHES = {"Doppler", "Gamma Doppler"}
+_CH_FINISHES = {"Case Hardened"}
+_FADE_FINISHES = {"Fade"}
+
+
+def _pattern_for(finish: str) -> str:
+    if finish in _DOPPLER_FINISHES:
+        return "doppler_phase"
+    if finish in _CH_FINISHES:
+        return "case_hardened"
+    if finish in _FADE_FINISHES:
+        return "fade"
+    return "generic"
+
+
+def _build_all_knife_skins() -> list[dict]:
+    skins = []
+    seen = set()
+    for knife in KNIFE_TYPES:
+        # Vanilla (no finish — just "★ Karambit" etc.)
+        vanilla_base = f"★ {knife}"
+        if vanilla_base not in seen:
+            skins.append({"base": vanilla_base, "pattern": "generic"})
+            seen.add(vanilla_base)
+        # Regular finishes
+        for finish in TIER1_FINISHES + TIER2_FINISHES:
+            if finish == "Vanilla":
+                continue  # handled above
+            base = f"★ {knife} | {finish}"
+            if base not in seen:
+                skins.append({"base": base, "pattern": _pattern_for(finish)})
+                seen.add(base)
+    return skins
+
+
+ALL_KNIFE_SKINS = _build_all_knife_skins()
+
+
+def all_knife_market_hash_names(stattrak: bool = False) -> list[str]:
+    """Every (knife × finish × exterior) market_hash_name across ALL knife types.
+
+    Used by the expanded collector. Vanilla knives have no exterior suffix
+    in the API, but we still try all exteriors — the API returns empty for
+    invalid combos, which is fine.
+    """
+    prefix = "★ StatTrak™ " if stattrak else ""
+    names = []
+    for skin in ALL_KNIFE_SKINS:
+        base = skin["base"]
+        is_vanilla = "|" not in base
+        if stattrak:
+            base = base.replace("★ ", prefix, 1)
+        if is_vanilla:
+            # Vanilla knives: no exterior in name, just "★ Karambit"
+            names.append(base)
+        else:
+            for ext in EXTERIORS:
+                names.append(f"{base} ({ext})")
     return names
