@@ -7,6 +7,7 @@ The locked set is unchanged and used by the v1 model / scoring pipeline.
 The full set is used by the collector (--full flag) to accumulate sold-price
 data across the entire knife market for v1.5.
 """
+from __future__ import annotations
 
 EXTERIORS = [
     "Factory New",
