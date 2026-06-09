@@ -54,8 +54,13 @@ def _prepare_dataset(df: pd.DataFrame) -> lgb.Dataset:
 def train(df: pd.DataFrame, *, num_boost_round: int = 500,
           early_stopping_rounds: int = 50,
           test_fraction: float = 0.15,
-          seed: int = 42) -> dict[str, Any]:
+          seed: int = 42,
+          test_indices: np.ndarray | None = None) -> dict[str, Any]:
     """Train quantile models and return results dict.
+
+    If `test_indices` is given (positional indices into df), those rows form
+    the test set and everything else trains — used for the time-based split
+    in v1.5. Default None keeps the v1 random split unchanged.
 
     Returns:
         {
@@ -64,12 +69,16 @@ def train(df: pd.DataFrame, *, num_boost_round: int = 500,
             "feature_importance": DataFrame,
         }
     """
-    rng = np.random.default_rng(seed)
     n = len(df)
-    perm = rng.permutation(n)
-    n_test = int(n * test_fraction)
-    test_idx = perm[:n_test]
-    train_idx = perm[n_test:]
+    if test_indices is not None:
+        test_idx = np.asarray(test_indices)
+        train_idx = np.setdiff1d(np.arange(n), test_idx)
+    else:
+        rng = np.random.default_rng(seed)
+        perm = rng.permutation(n)
+        n_test = int(n * test_fraction)
+        test_idx = perm[:n_test]
+        train_idx = perm[n_test:]
 
     train_ds = _prepare_dataset(df.iloc[train_idx])
     test_ds = _prepare_dataset(df.iloc[test_idx])
@@ -145,6 +154,25 @@ def load_models(model_dir: Path = MODEL_DIR) -> dict[float, lgb.Booster]:
         path = model_dir / f"lgb_q{int(q*100)}.txt"
         models[q] = lgb.Booster(model_file=str(path))
     return models
+
+
+def save_references(refs: dict[str, float], out_dir: Path) -> None:
+    """Save per-skin reference prices (medians of inferred sold prices, USD)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "references.json", "w") as f:
+        json.dump(refs, f, indent=2)
+
+
+def load_references(model_dir: Path) -> dict[str, float] | None:
+    """Load per-skin reference prices saved at training time (medians of
+    inferred sold prices, USD). Returns None if missing or unparseable."""
+    path = model_dir / "references.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
 
 
 def load_models_v15() -> dict[float, lgb.Booster] | None:

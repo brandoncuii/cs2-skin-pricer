@@ -62,8 +62,11 @@ KNIFE_TYPES = [
     "Ursus Knife",
 ]
 
-# Finishes grouped by availability tier.
-# Tier 1: available on all 20 knife types (covert+ finishes).
+# Finishes grouped roughly by era. These lists are a SUPERSET tried against every
+# knife type: many knife x finish combos don't exist on the market (e.g. Lore,
+# Autotronic, Black Laminate, Freehand, Bright Water exist only on the 5 original
+# knives). Invalid combos simply return no listings, at the cost of wasted API
+# calls — a curated per-knife availability map is a possible follow-up.
 TIER1_FINISHES = [
     "Doppler",
     "Marble Fade",
@@ -91,7 +94,7 @@ TIER1_FINISHES = [
     "Rust Coat",
 ]
 
-# Tier 2: newer finishes on most knives.
+# Tier 2: newer finishes (also a superset — not every knife has these).
 TIER2_FINISHES = [
     "Damascus Steel",
     "Night",

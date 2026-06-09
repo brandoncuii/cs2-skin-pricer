@@ -7,6 +7,11 @@ and trains LightGBM quantile regression (q10, q50, q90) on log_premium.
 Disappeared listings approximate sold prices (noisy — could be delist/expire).
 This is the key improvement over v1's asking-price basis.
 
+Uses a time-based train/test split (project rule): rows are sorted by
+last_seen and the newest 15% are held out. Per-skin reference prices
+(medians of inferred sold prices) are persisted to references.json so the
+API can recover them at serve time.
+
 Graceful handling:
   < 30 rows  → exit cleanly (not enough data)
   < 100 rows → warn but proceed
@@ -26,7 +31,7 @@ from cs2pricer.clean import parse_name
 from cs2pricer.features import (CATEGORICAL_COLS, DOPPLER_PHASE, FEATURE_COLS,
                                 TARGET_COL, add_features)
 from cs2pricer.model import (MODEL_V15_DIR, QUANTILES, predict, save_metadata,
-                             save_models, train)
+                             save_models, save_references, train)
 
 DB_PATH = Path("data/collector/observations.db")
 MIN_ROWS = 30
@@ -37,9 +42,38 @@ def _load_disappeared(db_path: Path) -> pd.DataFrame:
     """Load closed listings with their last observed price from the collector DB."""
     con = sqlite3.connect(db_path)
 
-    # Join listings (status='closed') with their last observation to get the
-    # terminal price. This is the best approximation of the sold price.
+    # Take each closed listing's latest observation as its terminal state.
+    # Exclude terminal_state='listed' (get_listing() proved the item is still
+    # live — it just fell out of pagination, so it never sold). Keep all other
+    # terminal states (gone/sold/...): delist/expire noise is an accepted v1.5
+    # limitation. When the terminal observation has no price (collector records
+    # state='gone' with NULL price when get_listing() fails), fall back to the
+    # listing's latest non-null observed price — the last asking price, which
+    # is the sold-price approximation anyway.
     query = """
+        WITH terminal AS (
+            SELECT listing_id, price_cents, state
+            FROM (
+                SELECT listing_id, price_cents, state,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY listing_id ORDER BY observed_at DESC
+                       ) AS rn
+                FROM observations
+            )
+            WHERE rn = 1
+        ),
+        last_priced AS (
+            SELECT listing_id, price_cents
+            FROM (
+                SELECT listing_id, price_cents,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY listing_id ORDER BY observed_at DESC
+                       ) AS rn
+                FROM observations
+                WHERE price_cents IS NOT NULL
+            )
+            WHERE rn = 1
+        )
         SELECT
             l.id,
             l.market_hash_name,
@@ -52,15 +86,16 @@ def _load_disappeared(db_path: Path) -> pd.DataFrame:
             l.paint_index,
             l.paint_seed,
             l.float_value,
-            o.price_cents,
-            o.state AS terminal_state,
+            COALESCE(t.price_cents, lp.price_cents) AS price_cents,
+            t.state AS terminal_state,
             l.last_seen
         FROM listings l
-        JOIN observations o ON o.listing_id = l.id
+        JOIN terminal t ON t.listing_id = l.id
+        LEFT JOIN last_priced lp ON lp.listing_id = l.id
         WHERE l.status = 'closed'
-          AND o.observed_at = l.last_seen
-          AND o.price_cents IS NOT NULL
-          AND o.price_cents > 0
+          AND t.state != 'listed'
+          AND COALESCE(t.price_cents, lp.price_cents) IS NOT NULL
+          AND COALESCE(t.price_cents, lp.price_cents) > 0
         ORDER BY l.last_seen DESC
     """
     df = pd.read_sql_query(query, con)
@@ -122,14 +157,27 @@ def main() -> int:
     df = add_features(df)
     print(f"  Features: {len(FEATURE_COLS)} columns, {len(df)} rows")
 
+    # Time-based split (project rule): newest 15% of rows held out as test.
+    df = df.sort_values("last_seen").reset_index(drop=True)
+    n_test = max(1, int(len(df) * 0.15))
+    test_idx = np.arange(len(df) - n_test, len(df))
+
     # Train.
     print("\n== Training v1.5 quantile models (q10, q50, q90) ==")
     print("  Basis: inferred sold prices (disappeared listings)")
-    result = train(df)
+    print(f"  Time-based split: newest {n_test} rows (by last_seen) held out")
+    result = train(df, test_indices=test_idx)
     models = result["models"]
 
     save_models(models, MODEL_V15_DIR)
     save_metadata(result, df, MODEL_V15_DIR)
+    # Persist per-skin reference prices (medians of inferred sold prices) so
+    # the API can normalize predictions the same way at serve time.
+    refs = {k: float(v) for k, v in
+            df.groupby("skin_base")["reference_usd"].first().items()}
+    save_references(refs, MODEL_V15_DIR)
+    print(f"  References saved to {MODEL_V15_DIR}/references.json "
+          f"({len(refs)} skins)")
     print(f"  Models saved to {MODEL_V15_DIR}/")
     print(f"  Best iterations: "
           + ", ".join(f"q{int(q*100)}={models[q].best_iteration}" for q in models))

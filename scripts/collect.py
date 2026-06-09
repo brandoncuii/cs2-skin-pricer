@@ -30,8 +30,10 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.full:
-        names = (all_knife_market_hash_names(stattrak=False)
-                 + all_knife_market_hash_names(stattrak=True))
+        # Non-StatTrak only: the StatTrak premium measured near-neutral in v1
+        # (and was dropped from the feature set), so skipping ST halves the
+        # rate-limit cost of the full sweep (~2,920 names vs ~5,840).
+        names = all_knife_market_hash_names(stattrak=False)
         max_pages = args.max_pages if args.max_pages is not None else 1
         mode = "full"
     else:

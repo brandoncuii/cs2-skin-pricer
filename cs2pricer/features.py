@@ -53,7 +53,9 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out["doppler_phase"] = out["paint_index"].map(DOPPLER_PHASE).fillna("n/a")
 
     # --- Case Hardened blue-gem tier (§7) ---
-    is_ch = out["finish"].eq("Case Hardened")
+    # Blue-gem seeds are knife-specific, so the Karambit tier map only applies to
+    # Karambit | Case Hardened rows (other knives' CH rows stay 0).
+    is_ch = out["finish"].eq("Case Hardened") & out["weapon"].eq("Karambit")
     out["ch_gem_tier"] = 0
     out.loc[is_ch, "ch_gem_tier"] = (
         out.loc[is_ch, "paint_seed"].map(KARAMBIT_CH_GEM_TIER).fillna(0).astype(int)

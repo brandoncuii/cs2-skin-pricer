@@ -80,7 +80,12 @@ def collect_once(con: sqlite3.Connection, client: CSFloatClient,
     con.commit()
 
     # Previously-open listings absent from this poll have left the listed pool.
-    open_prev = [row[0] for row in con.execute("SELECT id FROM listings WHERE status='open'")]
+    # Scope to the names queried THIS run: mixed locked/--full runs share this DB,
+    # and a narrow run must not mark un-queried skins' listings as disappeared.
+    queried = set(names)
+    open_prev = [row[0] for row in
+                 con.execute("SELECT id, market_hash_name FROM listings WHERE status='open'")
+                 if row[1] in queried]
     disappeared = [lid for lid in open_prev if lid not in seen]
     for lid in disappeared:
         state, price = "gone", None

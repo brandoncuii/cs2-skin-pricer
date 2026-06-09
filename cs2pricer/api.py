@@ -27,7 +27,7 @@ from .clean import flatten_listing
 from .features import (CATEGORICAL_COLS, DOPPLER_PHASE, FEATURE_COLS,
                        FLOAT_BOUNDARIES, KARAMBIT_CH_GEM_TIER, add_features)
 from .model import (MODEL_DIR, MODEL_V15_DIR, QUANTILES, load_models,
-                    load_models_v15, predict, v15_available)
+                    load_models_v15, load_references, predict, v15_available)
 from .skins import SKINS, market_hash_names
 
 app = FastAPI(
@@ -50,6 +50,8 @@ app.add_middleware(
 # --- Load models at startup ---
 _models_v1: dict[float, Any] | None = None
 _models_v15: dict[float, Any] | None = None
+_references_v15: dict[str, float] | None = None
+_references_v15_loaded: bool = False
 
 
 def _get_models(version: str = "v1") -> dict[float, Any]:
@@ -172,9 +174,24 @@ def _build_row(inp: ListingInput) -> pd.DataFrame:
     return df
 
 
+def _get_references_v15() -> dict[str, float] | None:
+    global _references_v15, _references_v15_loaded
+    if not _references_v15_loaded:
+        _references_v15 = load_references(MODEL_V15_DIR)
+        _references_v15_loaded = True
+    return _references_v15
+
+
 def _score_dataframe(df: pd.DataFrame, version: str = "v1") -> pd.DataFrame:
     """Score a full DataFrame and add prediction columns."""
     models = _get_models(version)
+    if version == "v1.5":
+        # v1.5 premiums are relative to its training-time sold-price references,
+        # so USD conversion must use those — not the live/asking medians.
+        refs = _get_references_v15()
+        if refs:
+            df = df.copy()
+            df["reference_usd"] = df["skin_base"].map(refs).fillna(df["reference_usd"])
     preds = predict(models, df)
     return df.assign(**preds)
 
