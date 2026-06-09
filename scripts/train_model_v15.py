@@ -44,12 +44,13 @@ def _load_disappeared(db_path: Path) -> pd.DataFrame:
 
     # Take each closed listing's latest observation as its terminal state.
     # Exclude terminal_state='listed' (get_listing() proved the item is still
-    # live — it just fell out of pagination, so it never sold). Keep all other
-    # terminal states (gone/sold/...): delist/expire noise is an accepted v1.5
-    # limitation. When the terminal observation has no price (collector records
-    # state='gone' with NULL price when get_listing() fails), fall back to the
-    # listing's latest non-null observed price — the last asking price, which
-    # is the sold-price approximation anyway.
+    # live — it just fell out of pagination, so it never sold) and 'delisted'
+    # (empirically confirmed 2026-06-09: the endpoint returns a distinct
+    # 'delisted' state, and a delisting is a withdrawal, not a transaction).
+    # Keep the rest (sold/gone/...): 'gone' rows are ambiguous (endpoint
+    # failed) — an accepted noise source. When the terminal observation has
+    # no price, fall back to the listing's latest non-null observed price —
+    # for buy_now listings the sale price IS the last asking price anyway.
     query = """
         WITH terminal AS (
             SELECT listing_id, price_cents, state
@@ -93,7 +94,7 @@ def _load_disappeared(db_path: Path) -> pd.DataFrame:
         JOIN terminal t ON t.listing_id = l.id
         LEFT JOIN last_priced lp ON lp.listing_id = l.id
         WHERE l.status = 'closed'
-          AND t.state != 'listed'
+          AND t.state NOT IN ('listed', 'delisted')
           AND COALESCE(t.price_cents, lp.price_cents) IS NOT NULL
           AND COALESCE(t.price_cents, lp.price_cents) > 0
         ORDER BY l.last_seen DESC
