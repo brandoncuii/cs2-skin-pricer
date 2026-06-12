@@ -25,6 +25,7 @@ import streamlit as st
 from cs2pricer.clean import flatten_listing
 from cs2pricer.client import CSFloatClient, CSFloatError, parse_listing_id
 from cs2pricer.features import DOPPLER_PHASE, add_features
+from cs2pricer.liquidity import load_stats, lookup_days_to_sell
 from cs2pricer.model import (MODEL_DIR, MODEL_V15_DIR, load_models,
                              load_models_v15, predict, v15_available)
 from cs2pricer.skins import EXTERIORS, SKINS, market_hash_names
@@ -101,6 +102,12 @@ def get_reference_prices() -> dict[str, float]:
     return df.groupby("skin_base")["price_usd"].median().to_dict()
 
 
+@st.cache_data(ttl=300)
+def get_liquidity_stats() -> dict | None:
+    """Empirical days-to-sale stats (scripts/build_liquidity.py); None if not built."""
+    return load_stats()
+
+
 def score_df(df: pd.DataFrame, refs: dict[str, float]) -> pd.DataFrame:
     """Add features and score a DataFrame."""
     df = add_features(df)
@@ -167,18 +174,55 @@ if page == "Find Deals":
             None,
         )
 
-        deals = scored[scored["is_deal"]].sort_values("discount_pct", ascending=False)
+        deals = scored[scored["is_deal"]].copy()
+
+        # --- Actionability ranking (replaces the raw discount sort) ---
+        # Empirical "similar items sold in ~X days" from the collector DB
+        # (scripts/build_liquidity.py). Buckets were built against v1.5 mids;
+        # here rel_to_mid uses the ACTIVE model's mid — coarse buckets, fine.
+        liq_stats = get_liquidity_stats()
+        if liq_stats is None:
+            st.info(
+                "Days-to-sale stats not built yet — ranking by discount and live "
+                "supply only. Build with: "
+                "`PYTHONPATH=. .venv/bin/python scripts/build_liquidity.py`"
+            )
+        rel_to_mid = deals["price_usd"] / deals["mid_usd"] - 1
+        looked_up = [
+            lookup_days_to_sell(liq_stats, sb, rel)
+            for sb, rel in zip(deals["skin_base"], rel_to_mid)
+        ]
+        deals["est_days_to_sell"] = [lk["days"] if lk else np.nan for lk in looked_up]
+        deals["days_basis"] = [
+            f"{lk['level']} (n={lk['n']})" if lk else "no data" for lk in looked_up
+        ]
+        deals["live_supply"] = deals["csfloat_quantity"]
+
+        # Actionability = Discount % x (1 + ln(1 + live supply)) / est. days to sell.
+        # Simple and visible on purpose: discount per expected day on market, nudged
+        # up by live supply (reference.quantity, log-scaled so it's a hint, not a
+        # driver). Days floored at 0.25 (~poll granularity) and defaulted to 1.0
+        # when no stats exist. Empirical + small-sample — a ranking, not a forecast.
+        est_days = deals["est_days_to_sell"].fillna(1.0).clip(lower=0.25)
+        supply_boost = 1.0 + np.log1p(deals["live_supply"].fillna(0).clip(lower=0))
+        deals["actionability"] = deals["discount_pct"] * supply_boost / est_days
+
+        deals = deals.sort_values("actionability", ascending=False)
         st.success(f"Scored {len(scored)} listings — **{len(deals)} deals** found")
 
         if len(deals) > 0:
             display_cols = [
                 "market_hash_name", "price_usd", "low_usd", "mid_usd", "high_usd",
-                "discount_pct", "float_value", "paint_seed", "doppler_phase", "exterior",
+                "discount_pct", "est_days_to_sell", "days_basis", "live_supply",
+                "actionability",
+                "float_value", "paint_seed", "doppler_phase", "exterior",
             ]
             show = deals[display_cols].copy()
             show.columns = [
                 "Skin", "Price ($)", "Low ($)", "Mid ($)", "High ($)",
-                "Discount %", "Float", "Seed", "Phase", "Exterior",
+                "Discount %", "Est. Days to Sell", "Days Basis", "Live Supply",
+                "Actionability",
+                "Float", "Seed", "Phase", "Exterior",
             ]
             st.dataframe(
                 show.reset_index(drop=True),
@@ -189,8 +233,21 @@ if page == "Find Deals":
                     "Mid ($)": st.column_config.NumberColumn(format="$%.2f"),
                     "High ($)": st.column_config.NumberColumn(format="$%.2f"),
                     "Discount %": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Est. Days to Sell": st.column_config.NumberColumn(format="%.2f"),
+                    "Actionability": st.column_config.NumberColumn(format="%.1f"),
                     "Float": st.column_config.NumberColumn(format="%.6f"),
                 },
+            )
+            st.caption(
+                "Ranked by **Actionability** = Discount % × (1 + ln(1 + Live Supply)) "
+                "÷ Est. Days to Sell. *Est. Days to Sell* is the empirical median "
+                "observed days-on-market of similar SOLD listings from our collector "
+                "(3h–12h polls, ~231 sales over a few days — small sample, and "
+                "right-censored: still-listed items haven't sold yet, so true times "
+                "run longer). *Days Basis* shows the stat's grouping level "
+                "(skin+price-bucket → skin → global fallback). *Live Supply* is "
+                "CSFloat's count of live listings of the same name — a rough "
+                "liquidity hint."
             )
         else:
             st.info("No deals found in the current listings. Try scanning more pages or waiting for new listings.")
