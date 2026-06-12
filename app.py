@@ -16,10 +16,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
 from cs2pricer.clean import flatten_listing
-from cs2pricer.client import CSFloatClient
+from cs2pricer.client import CSFloatClient, CSFloatError, parse_listing_id
 from cs2pricer.features import DOPPLER_PHASE, add_features
 from cs2pricer.model import (MODEL_DIR, MODEL_V15_DIR, load_models,
                              load_models_v15, predict, v15_available)
@@ -198,6 +199,99 @@ elif page == "Score a Listing":
         f"Model: **{version_tag}** — Enter a listing's attributes to get its "
         "estimated fair-value range."
     )
+
+    # --- Fetch a live listing by URL or ID ---
+    supported_bases = {s["base"].replace("★ ", "") for s in SKINS}
+
+    listing_input = st.text_input(
+        "CSFloat listing URL or ID",
+        placeholder="https://csfloat.com/item/824952510281353471",
+        help="Paste a listing URL (or bare numeric ID) to fetch and score it automatically.",
+    )
+
+    if st.button("Fetch & Score", type="primary"):
+        listing_id = parse_listing_id(listing_input)
+        if listing_id is None:
+            st.error(
+                "Couldn't read that. Paste a CSFloat listing URL like "
+                "`https://csfloat.com/item/824952510281353471` or a bare numeric ID."
+            )
+        else:
+            raw = None
+            try:
+                raw = CSFloatClient().get_listing(listing_id)
+            except (CSFloatError, requests.RequestException) as exc:
+                st.error(f"Couldn't fetch listing `{listing_id}`: {exc}")
+
+            if raw is not None:
+                flat = flatten_listing(raw)
+                if flat["skin_base"] not in supported_bases:
+                    supported = ", ".join(s["base"] for s in SKINS)
+                    st.error(
+                        f"Unsupported skin: **{flat['market_hash_name'] or 'unknown item'}**. "
+                        f"The model only supports: {supported}."
+                    )
+                elif (flat["price_usd"] is None or flat["price_usd"] <= 0
+                      or flat["float_value"] is None or flat["paint_seed"] is None):
+                    st.error("Listing is missing price, float, or seed data — can't score it.")
+                else:
+                    refs = get_reference_prices()
+                    scored = score_df(pd.DataFrame([flat]), refs)
+                    row = scored.iloc[0]
+                    ask_usd = row["price_usd"]
+
+                    st.divider()
+                    st.markdown(f"**{row['market_hash_name']}**")
+                    if flat["state"] != "listed":
+                        st.caption(f"Note: this listing's state is **{flat['state']}**, not currently listed.")
+
+                    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+                    col_f1.metric("Ask Price", f"${ask_usd:.2f}")
+                    col_f2.metric("Low (10th pctile)", f"${row['low_usd']:.2f}")
+                    col_f3.metric("Mid (50th pctile)", f"${row['mid_usd']:.2f}")
+                    col_f4.metric("High (90th pctile)", f"${row['high_usd']:.2f}")
+
+                    detail = (
+                        f"Float: {row['float_value']:.6f} · Seed: {int(row['paint_seed'])} · "
+                        f"Exterior: {row['exterior']}"
+                    )
+                    phase = row.get("doppler_phase")
+                    if phase and phase != "n/a":
+                        detail += f" · Doppler Phase: **{phase}**"
+                    st.caption(detail)
+
+                    st.divider()
+                    if ask_usd < row["low_usd"]:
+                        discount = (1 - ask_usd / row["low_usd"]) * 100
+                        st.success(
+                            f"**Deal!** At ${ask_usd:.2f}, this ask is {discount:.1f}% below "
+                            f"the model's low estimate for comparable asks."
+                        )
+                    elif ask_usd > row["high_usd"]:
+                        premium = (ask_usd / row["high_usd"] - 1) * 100
+                        st.warning(
+                            f"At ${ask_usd:.2f}, this ask is {premium:.1f}% above the model's "
+                            f"high estimate for comparable asks."
+                        )
+                    else:
+                        st.info(
+                            f"At ${ask_usd:.2f}, this ask is within the model's estimated "
+                            f"range for comparable asks."
+                        )
+
+                    if use_v15:
+                        st.caption(
+                            "v1.5 basis: trained on inferred sold prices (collector disappearance data). "
+                            "More accurate than asking-price estimates."
+                        )
+                    else:
+                        st.caption(
+                            "⚠️ v1 basis: trained on asking prices. 'Deal' = cheaper than comparable "
+                            "current asks, not below true fair value."
+                        )
+
+    st.divider()
+    st.subheader("Or enter attributes manually")
 
     col1, col2 = st.columns(2)
     with col1:

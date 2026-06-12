@@ -9,6 +9,7 @@ never touch FloatDB.
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -18,6 +19,23 @@ from .config import api_key
 
 BASE_URL = "https://csfloat.com/api/v1"
 MAX_LIMIT = 50  # API hard cap per /listings call
+
+_ITEM_URL_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?csfloat\.com/item/(\d+)(?:[/?#].*)?$"
+)
+
+
+def parse_listing_id(text: str) -> str | None:
+    """Extract a listing id from a CSFloat item URL or a bare numeric id.
+
+    Accepts 'https://csfloat.com/item/<id>', 'csfloat.com/item/<id>', or '<id>'.
+    Returns None for anything else.
+    """
+    text = text.strip()
+    if text.isdigit():
+        return text
+    m = _ITEM_URL_RE.match(text)
+    return m.group(1) if m else None
 
 
 class CSFloatError(RuntimeError):
