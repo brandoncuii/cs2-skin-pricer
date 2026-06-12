@@ -46,7 +46,9 @@ def _load_disappeared(db_path: Path) -> pd.DataFrame:
     # Exclude terminal_state='listed' (get_listing() proved the item is still
     # live — it just fell out of pagination, so it never sold) and 'delisted'
     # (empirically confirmed 2026-06-09: the endpoint returns a distinct
-    # 'delisted' state, and a delisting is a withdrawal, not a transaction).
+    # 'delisted' state, and a delisting is a withdrawal, not a transaction)
+    # and 'refunded' (the sale was reversed, so its price is not a clean
+    # sold-price signal).
     # Keep the rest (sold/gone/...): 'gone' rows are ambiguous (endpoint
     # failed) — an accepted noise source. When the terminal observation has
     # no price, fall back to the listing's latest non-null observed price —
@@ -94,7 +96,7 @@ def _load_disappeared(db_path: Path) -> pd.DataFrame:
         JOIN terminal t ON t.listing_id = l.id
         LEFT JOIN last_priced lp ON lp.listing_id = l.id
         WHERE l.status = 'closed'
-          AND t.state NOT IN ('listed', 'delisted')
+          AND t.state NOT IN ('listed', 'delisted', 'refunded')
           AND COALESCE(t.price_cents, lp.price_cents) IS NOT NULL
           AND COALESCE(t.price_cents, lp.price_cents) > 0
         ORDER BY l.last_seen DESC
