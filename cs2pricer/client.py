@@ -88,7 +88,14 @@ class CSFloatClient:
         url = f"{BASE_URL}{path}"
         for attempt in range(self._max_retries):
             self._throttle()
-            resp = self._session.get(url, params=params, timeout=30)
+            try:
+                resp = self._session.get(url, params=params, timeout=30)
+            except requests.RequestException:
+                # Transient network failure (connection reset, DNS, timeout):
+                # back off and retry, same as a 5xx.
+                self._last_call = time.monotonic()
+                time.sleep(self._base_backoff * (2 ** attempt))
+                continue
             self._last_call = time.monotonic()
             self._note_headers(resp)
 
