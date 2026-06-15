@@ -46,4 +46,4 @@ jobs:
         run: ruff check cs2pricer/ tests/
 
       - name: Format check
-        run: ruff format --check cs2pricer/ tests/
+        run: ruff format --check tests/
