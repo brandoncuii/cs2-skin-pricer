@@ -225,3 +225,19 @@ Get each phase working AND understood before starting the next.
   regression buys here; how each engineered feature affects price; **why training on asking prices
   is a limitation, why the v1 flag is "cheapest current ask," and what sold prices would change.**
   (If you can't defend it in an interview, it's not done.)
+
+## 12. Scope amendment — 2026-06-15 (all-knife widening)
+
+v1 has **shipped**: the original 4 locked knife skins, asking-price basis, as scoped above.
+
+**Scope now widens to ALL KNIVES** (~20 knife types × finishes), owner-approved 2026-06-12,
+enabled by the Raspberry Pi collector's all-knife sweeps. This adds a new asking-price model
+(`data/model_all/`) covering every knife with enough collected listings; skins below a support
+threshold are flagged as **"thin"** rather than hidden.
+
+- **Honesty rules UNCHANGED.** The all-knife model trains on **ASKING** prices and must be labeled
+  as such everywhere (code, docs, UI). It is NOT true fair value — the §5 asterisk still applies.
+- **v1.5 (inferred sold prices) REMAINS scoped to the 4 locked skins for now.** There isn't enough
+  sold-price data across all knives yet; widening v1.5 waits on more collector data.
+- **Still OUT of scope (unchanged):** rifles, gloves, and all non-knife categories; browser
+  extension; arbitrage; alerts.

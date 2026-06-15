@@ -33,6 +33,12 @@ from cs2pricer.skins import EXTERIORS, SKINS, market_hash_names
 
 st.set_page_config(page_title="CS2 Knife Pricer", page_icon="🔪", layout="wide")
 
+# --- Paths ---
+CLEAN_PATH = Path("data/clean/listings.parquet")
+BACKTEST_DIR = Path("data/backtest")
+MODEL_ALL_DIR = Path("data/model_all")
+
+
 # --- Load models ---
 @st.cache_resource
 def get_models_v1():
@@ -48,8 +54,38 @@ def get_models_v15():
     return load_models_v15()
 
 
+@st.cache_resource
+def get_models_all():
+    """Load the all-knife models if all three booster files exist, else None."""
+    if not all(
+        (MODEL_ALL_DIR / f"lgb_q{q}.txt").exists() for q in (10, 50, 90)
+    ):
+        return None
+    try:
+        return load_models(MODEL_ALL_DIR)
+    except Exception:
+        return None
+
+
+@st.cache_data
+def get_supported_skins_all() -> dict | None:
+    """Parse data/model_all/supported_skins.json, or None if missing/unparseable."""
+    path = MODEL_ALL_DIR / "supported_skins.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
 models_v1 = get_models_v1()
 models_v15 = get_models_v15()
+models_all = get_models_all()
+supported_all = get_supported_skins_all()
+# The all-knife model is only offered when BOTH the boosters and the
+# supported-skins manifest are present and valid.
+all_available = models_all is not None and supported_all is not None
 
 if models_v1 is None:
     st.error("Model not trained yet. Run: `PYTHONPATH=. .venv/bin/python scripts/train_model.py`")
@@ -62,13 +98,30 @@ st.sidebar.title("🔪 CS2 Knife Pricer")
 version_options = ["v1 (asking prices)"]
 if models_v15 is not None:
     version_options.append("v1.5 (sold prices)")
+if all_available:
+    version_options.append("v1-all (all knives, asking prices)")
 
 selected_version_label = st.sidebar.radio("Model Version", version_options)
 use_v15 = "v1.5" in selected_version_label and models_v15 is not None
-active_models = models_v15 if use_v15 else models_v1
-version_tag = "v1.5" if use_v15 else "v1"
+use_all = "v1-all" in selected_version_label and all_available
+if use_all:
+    active_models = models_all
+    version_tag = "v1-all"
+elif use_v15:
+    active_models = models_v15
+    version_tag = "v1.5"
+else:
+    active_models = models_v1
+    version_tag = "v1"
 
-if use_v15:
+if use_all:
+    st.sidebar.caption(
+        "**v1-all — trained on ASKING prices across all knives.**\n\n"
+        "Covers the whole knife market, not just the locked 4. A 'deal' means "
+        "priced below comparable items' CURRENT asks — this is NOT true fair "
+        "value (asks sit above sale prices; sold-price data → v1.5)."
+    )
+elif use_v15:
     st.sidebar.caption(
         "**v1.5 — trained on inferred sold prices.**\n\n"
         "Uses collector disappearance data to estimate actual transaction prices. "
@@ -90,10 +143,6 @@ if models_v15 is None:
 page = st.sidebar.radio("View", ["Find Deals", "Score a Listing", "Track Record"])
 
 # --- Helpers ---
-CLEAN_PATH = Path("data/clean/listings.parquet")
-BACKTEST_DIR = Path("data/backtest")
-
-
 @st.cache_data(ttl=300)
 def get_reference_prices() -> dict[str, float]:
     """Median price per skin_base from the clean dataset."""
@@ -112,10 +161,21 @@ def get_sold_reference_prices() -> dict[str, float]:
     return load_references(MODEL_V15_DIR) or {}
 
 
+@st.cache_data(ttl=300)
+def get_all_reference_prices() -> dict[str, float]:
+    """Per-skin ask-price medians saved at v1-all training time — the dollar
+    anchors the all-knife models were normalized against."""
+    return load_references(MODEL_ALL_DIR) or {}
+
+
 def get_active_references() -> dict[str, float]:
-    """Reference anchors matching the active model: sold-price medians for v1.5,
-    asking-price medians for v1. Falls back to ask medians if the v1.5 refs are
-    missing, so the app still runs."""
+    """Reference anchors matching the active model: ask medians across all knives
+    for v1-all, sold-price medians for v1.5, asking-price medians for v1. Falls
+    back to ask medians if version-specific refs are missing, so the app runs."""
+    if use_all:
+        refs = get_all_reference_prices()
+        if refs:
+            return refs
     if use_v15:
         refs = get_sold_reference_prices()
         if refs:
@@ -127,6 +187,19 @@ def get_active_references() -> dict[str, float]:
 def get_liquidity_stats() -> dict | None:
     """Empirical days-to-sale stats (scripts/build_liquidity.py); None if not built."""
     return load_stats()
+
+
+def market_names_for_base(skin_base: str) -> list[str]:
+    """CSFloat market_hash_names for one skin_base across all exteriors.
+
+    Works for arbitrary "<weapon> | <finish>" skin_base values (the all-knife
+    universe), matching the names the locked path already produces: a leading
+    "★ " star and an exterior suffix. We strip any leading "★ " from the key
+    first so a key written either way ("Karambit | Doppler" or
+    "★ Karambit | Doppler") yields the same valid name. Non-StatTrak only —
+    see report; StatTrak knife premiums were pulled in Phase 0."""
+    base = skin_base.replace("★ ", "", 1) if skin_base.startswith("★ ") else skin_base
+    return [f"★ {base} ({ext})" for ext in EXTERIORS]
 
 
 def score_df(df: pd.DataFrame, refs: dict[str, float]) -> pd.DataFrame:
@@ -149,11 +222,26 @@ if page == "Find Deals":
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        selected_skins = st.multiselect(
-            "Skins to scan",
-            [s["base"] for s in SKINS],
-            default=[s["base"] for s in SKINS],
-        )
+        if use_all:
+            supported_keys = sorted(supported_all["supported"].keys())
+            default_skins = supported_keys[:10]
+            selected_skins = st.multiselect(
+                "Skins to scan",
+                supported_keys,
+                default=default_skins,
+            )
+            st.caption(
+                f"All-knife model: {len(supported_keys)} well-populated skins "
+                "available. Defaulting to the first 10 to keep the scan fast — "
+                "add more above (each skin hits the CSFloat API across all "
+                "exteriors)."
+            )
+        else:
+            selected_skins = st.multiselect(
+                "Skins to scan",
+                [s["base"] for s in SKINS],
+                default=[s["base"] for s in SKINS],
+            )
     with col2:
         max_pages = st.slider("Pages per skin (more = slower, more listings)", 1, 10, 3)
 
@@ -162,12 +250,16 @@ if page == "Find Deals":
         client = CSFloatClient()
 
         names = []
-        for skin in SKINS:
-            if skin["base"] in selected_skins:
-                for ext in EXTERIORS:
-                    names.append(f"{skin['base']} ({ext})")
-                    st_name = skin["base"].replace("★ ", "★ StatTrak™ ", 1)
-                    names.append(f"{st_name} ({ext})")
+        if use_all:
+            for skin_base in selected_skins:
+                names.extend(market_names_for_base(skin_base))
+        else:
+            for skin in SKINS:
+                if skin["base"] in selected_skins:
+                    for ext in EXTERIORS:
+                        names.append(f"{skin['base']} ({ext})")
+                        st_name = skin["base"].replace("★ ", "★ StatTrak™ ", 1)
+                        names.append(f"{st_name} ({ext})")
 
         raw_listings: list[dict] = []
         progress = st.progress(0, text="Pulling listings...")
@@ -283,7 +375,17 @@ elif page == "Score a Listing":
     )
 
     # --- Fetch a live listing by URL or ID ---
-    supported_bases = {s["base"].replace("★ ", "") for s in SKINS}
+    # flatten_listing produces skin_base WITHOUT the leading "★ " (it's
+    # "<weapon> | <finish>"), so we normalize the supported-set keys the same way.
+    def _strip_star(b: str) -> str:
+        return b.replace("★ ", "", 1) if b.startswith("★ ") else b
+
+    if use_all:
+        supported_bases = {_strip_star(b) for b in supported_all["supported"]}
+        thin_bases = {_strip_star(b) for b in supported_all["thin"]}
+    else:
+        supported_bases = {s["base"].replace("★ ", "") for s in SKINS}
+        thin_bases = set()
 
     listing_input = st.text_input(
         "CSFloat listing URL or ID",
@@ -307,11 +409,21 @@ elif page == "Score a Listing":
 
             if raw is not None:
                 flat = flatten_listing(raw)
-                if flat["skin_base"] not in supported_bases:
-                    supported = ", ".join(s["base"] for s in SKINS)
+                sb = flat["skin_base"]
+                is_thin = sb in thin_bases
+                if sb not in supported_bases and not is_thin:
+                    if use_all:
+                        msg = (
+                            "It isn't in the all-knife model's supported set "
+                            "(too few observations to price reliably)."
+                        )
+                    else:
+                        msg = "The model only supports: " + ", ".join(
+                            s["base"] for s in SKINS
+                        ) + "."
                     st.error(
                         f"Unsupported skin: **{flat['market_hash_name'] or 'unknown item'}**. "
-                        f"The model only supports: {supported}."
+                        + msg
                     )
                 elif (flat["price_usd"] is None or flat["price_usd"] <= 0
                       or flat["float_value"] is None or flat["paint_seed"] is None):
@@ -324,6 +436,12 @@ elif page == "Score a Listing":
 
                     st.divider()
                     st.markdown(f"**{row['market_hash_name']}**")
+                    if is_thin:
+                        n = supported_all["thin"].get(sb, supported_all["thin"].get(f"★ {sb}"))
+                        st.warning(
+                            f"⚠️ Thin data: only {n} observations for this skin — "
+                            "the estimate is noisy."
+                        )
                     if flat["state"] != "listed":
                         st.caption(f"Note: this listing's state is **{flat['state']}**, not currently listed.")
 
@@ -361,7 +479,12 @@ elif page == "Score a Listing":
                             f"range for comparable asks."
                         )
 
-                    if use_v15:
+                    if use_all:
+                        st.caption(
+                            "⚠️ v1-all basis: trained on asking prices across all knives. "
+                            "'Deal' = cheaper than comparable current asks, not below true fair value."
+                        )
+                    elif use_v15:
                         st.caption(
                             "v1.5 basis: trained on inferred sold prices (collector disappearance data). "
                             "More accurate than asking-price estimates."
@@ -375,9 +498,22 @@ elif page == "Score a Listing":
     st.divider()
     st.subheader("Or enter attributes manually")
 
+    if use_all:
+        # Supported set comes from the all-knife manifest (supported + thin).
+        # Display with a leading "★ " to match the locked-set style; the
+        # weapon_finish = skin_base.replace("★ ", "") below normalizes either form.
+        def _with_star(b: str) -> str:
+            return b if b.startswith("★ ") else f"★ {b}"
+        manual_skin_options = sorted(
+            {_with_star(b) for b in supported_all["supported"]}
+            | {_with_star(b) for b in supported_all["thin"]}
+        )
+    else:
+        manual_skin_options = [s["base"] for s in SKINS]
+
     col1, col2 = st.columns(2)
     with col1:
-        skin_base = st.selectbox("Skin", [s["base"] for s in SKINS])
+        skin_base = st.selectbox("Skin", manual_skin_options)
         exterior = st.selectbox("Exterior", EXTERIORS)
         is_stattrak = st.checkbox("StatTrak™")
         price_usd = st.number_input("Asking Price (USD)", min_value=1.0, value=1500.0, step=50.0)
@@ -421,6 +557,14 @@ elif page == "Score a Listing":
         is_deal = row["price_usd"] < row["low_usd"]
 
         st.divider()
+        if use_all and flat["skin_base"] in thin_bases:
+            n = supported_all["thin"].get(
+                flat["skin_base"], supported_all["thin"].get(f"★ {flat['skin_base']}")
+            )
+            st.warning(
+                f"⚠️ Thin data: only {n} observations for this skin — "
+                "the estimate is noisy."
+            )
         col_r1, col_r2, col_r3 = st.columns(3)
         col_r1.metric("Low (10th pctile)", f"${row['low_usd']:.2f}")
         col_r2.metric("Mid (50th pctile)", f"${row['mid_usd']:.2f}")
@@ -443,7 +587,12 @@ elif page == "Score a Listing":
         if phase and phase != "n/a":
             st.caption(f"Doppler Phase: **{phase}** (from paint_index {paint_index})")
 
-        if use_v15:
+        if use_all:
+            st.caption(
+                "⚠️ v1-all basis: trained on asking prices across all knives. "
+                "'Deal' = cheaper than comparable current asks, not below true fair value."
+            )
+        elif use_v15:
             st.caption(
                 "v1.5 basis: trained on inferred sold prices (collector disappearance data). "
                 "More accurate than asking-price estimates."
