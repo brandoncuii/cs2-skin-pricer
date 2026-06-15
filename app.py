@@ -27,7 +27,8 @@ from cs2pricer.client import CSFloatClient, CSFloatError, parse_listing_id
 from cs2pricer.features import DOPPLER_PHASE, add_features
 from cs2pricer.liquidity import load_stats, lookup_days_to_sell
 from cs2pricer.model import (MODEL_DIR, MODEL_V15_DIR, load_models,
-                             load_models_v15, predict, v15_available)
+                             load_models_v15, load_references, predict,
+                             v15_available)
 from cs2pricer.skins import EXTERIORS, SKINS, market_hash_names
 
 st.set_page_config(page_title="CS2 Knife Pricer", page_icon="🔪", layout="wide")
@@ -103,6 +104,26 @@ def get_reference_prices() -> dict[str, float]:
 
 
 @st.cache_data(ttl=300)
+def get_sold_reference_prices() -> dict[str, float]:
+    """Per-skin sold-price medians saved at v1.5 training time. These are the
+    dollar anchors the v1.5 models were normalized against, so v1.5 predictions
+    must use them — not asking-price medians, which run higher and would inflate
+    every estimate."""
+    return load_references(MODEL_V15_DIR) or {}
+
+
+def get_active_references() -> dict[str, float]:
+    """Reference anchors matching the active model: sold-price medians for v1.5,
+    asking-price medians for v1. Falls back to ask medians if the v1.5 refs are
+    missing, so the app still runs."""
+    if use_v15:
+        refs = get_sold_reference_prices()
+        if refs:
+            return refs
+    return get_reference_prices()
+
+
+@st.cache_data(ttl=300)
 def get_liquidity_stats() -> dict | None:
     """Empirical days-to-sale stats (scripts/build_liquidity.py); None if not built."""
     return load_stats()
@@ -137,7 +158,7 @@ if page == "Find Deals":
         max_pages = st.slider("Pages per skin (more = slower, more listings)", 1, 10, 3)
 
     if st.button("🔍 Scan for Deals", type="primary"):
-        refs = get_reference_prices()
+        refs = get_active_references()
         client = CSFloatClient()
 
         names = []
@@ -296,7 +317,7 @@ elif page == "Score a Listing":
                       or flat["float_value"] is None or flat["paint_seed"] is None):
                     st.error("Listing is missing price, float, or seed data — can't score it.")
                 else:
-                    refs = get_reference_prices()
+                    refs = get_active_references()
                     scored = score_df(pd.DataFrame([flat]), refs)
                     row = scored.iloc[0]
                     ask_usd = row["price_usd"]
@@ -373,7 +394,7 @@ elif page == "Score a Listing":
     market_hash_name = f"{prefix}{weapon_finish} ({exterior})"
 
     if st.button("Score", type="primary"):
-        refs = get_reference_prices()
+        refs = get_active_references()
 
         raw = {
             "id": "manual",
