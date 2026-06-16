@@ -1,0 +1,3 @@
+[lint.per-file-ignores]
+# Pre-existing unused imports in api.py (re-exports used by app.py at runtime).
+"cs2pricer/api.py" = ["F401"]
